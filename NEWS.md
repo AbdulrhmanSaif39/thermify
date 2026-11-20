@@ -1,5 +1,16 @@
 # thermify (development version)
 
+## Breaking changes
+
+* `thermify()` and `thermify_rast()` now count chilling hours on the hourly
+  temperatures by default (`ch_methods = "hourly"`, from observed or
+  reconstructed hourly series) instead of the analytical sine estimate
+  from daily extremes (`"sine"`). In the CEAZA-Met validation the hourly
+  count (Linvill reconstruction) was within 1 % of the observed chilling
+  hours, against -9 % for the sine estimate. Results keyed `ch_sine` are
+  now `ch_hourly`; set `ch_methods = "sine"` to keep the previous output.
+  A note is shown once per session when the default is used (#43).
+
 ## New features
 
 * `worldclim_future_region()` reads WorldClim 2.1 downscaled CMIP6
@@ -21,7 +32,6 @@
   2041-2060 (14 GCMs, SSP2-4.5 and SSP5-8.5) over the province of Cauquenes,
   and at 29 CEAZA-Met stations with a delta method applied to the
   observed hourly records. Scripts in `data-raw/climate-change/`.
-
 * New article "Validation with observed hourly temperature: CEAZA-Met
   network" with the results of the 30-station validation, per-station
   figures and practical guidance; `vignette("validation")` summarises them.
