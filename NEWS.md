@@ -1,5 +1,13 @@
 # thermify (development version)
 
+## New features
+
+* `worldclim_future_region()` reads WorldClim 2.1 downscaled CMIP6
+  projections (monthly `tmin`, `tmax`, `prec` at 30 arc-seconds) for a
+  region, reading only the bytes of the region from the global files
+  (about 5 GB each) and caching the result. `worldclim_cmip6_gcms` lists
+  the available global climate models.
+
 ## Changes
 
 * `validate_station()` also evaluates degree-days computed on the hourly
@@ -7,6 +15,12 @@
   `"hourly_sine"`), at the daily, monthly and gridded levels.
 
 ## Documentation
+
+* New article "Projected change of thermal indices: WorldClim CMIP6": change
+  of degree-days, chilling hours, Utah units and chill portions by
+  2041-2060 (14 GCMs, SSP2-4.5 and SSP5-8.5) over the province of Cauquenes,
+  and at 29 CEAZA-Met stations with a delta method applied to the
+  observed hourly records. Scripts in `data-raw/climate-change/`.
 
 * New article "Validation with observed hourly temperature: CEAZA-Met
   network" with the results of the 30-station validation, per-station
