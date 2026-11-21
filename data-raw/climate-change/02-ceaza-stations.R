@@ -17,6 +17,13 @@
 # climatologies lose (they underestimate chill strongly at these sites), and
 # the present-day baseline equals the observed indices.
 #
+# The CMIP6 changes are relative to 1970-2000, while the records cover about
+# 2004-2025 and already contain part of that warming. Each model's change is
+# therefore taken from the record period to 2041-2060: its change at the
+# record's midpoint is interpolated between 1985 and its 2021-2040 change and
+# subtracted (change_from_record() in helpers.R), so that the warming already
+# in the record is not counted twice.
+#
 #   Rscript data-raw/climate-change/02-ceaza-stations.R
 #
 # Needs the hourly cache of data-raw/validation-ceaza/02-download.R.
@@ -28,6 +35,7 @@ wc_dir <- Sys.getenv("THERMIFY_DATA", file.path(tempdir(), "worldclim"))
 cache <- Sys.getenv("THERMIFY_CEAZA_CACHE",
                     file.path(tools::R_user_dir("thermify", "cache"), "ceaza"))
 out_dir <- "vignettes/articles/data"
+cores <- as.integer(Sys.getenv("THERMIFY_CORES", "4"))
 
 gcms <- c("ACCESS-CM2", "BCC-CSM2-MR", "CanESM5", "CMCC-ESM2",
           "CNRM-CM6-1-HR", "EC-Earth3-Veg", "GISS-E2-1-G", "HadGEM3-GC31-LL",
@@ -35,8 +43,6 @@ gcms <- c("ACCESS-CM2", "BCC-CSM2-MR", "CanESM5", "CMCC-ESM2",
           "MRI-ESM2-0", "UKESM1-0-LL")
 ssps <- c("245", "585")
 period <- "2041-2060"
-heat <- c("09-01", "04-30")
-chill <- c("05-01", "08-31")
 
 stations <- utils::read.csv("data-raw/validation-ceaza/results/ceaza-stations.csv",
                             encoding = "UTF-8")
@@ -51,59 +57,31 @@ wc_now <- list(tmin = cell(worldclim_region("tmin", region, wc_dir,
                tmax = cell(worldclim_region("tmax", region, wc_dir,
                                             mask = FALSE)))
 
-# Season totals of the four indices from an hourly record, for complete
-# seasons only (every day valid after filling gaps of up to 2 hours).
-season_indices <- function(time, temperature) {
-  st <- prepare_station_hourly(time, temperature, max_gap = 2)
-  flat <- function(days) as.vector(t(st$hourly[days, , drop = FALSE]))
-  out <- list()
-  for (w in list(heat = heat, chill = chill)) {
-    sel <- season_days(st$dates, w[1], w[2])
-    lab <- attr(sel, "season")
-    for (s in unique(lab)) {
-      days <- sel[lab == s]
-      if (length(days) != thermify:::window_length(s, w) ||
-          !all(st$valid[days])) next
-      h <- flat(days)
-      vals <- if (identical(w, heat)) {
-        c(gdd = sum(degree_hours(h, base = 10)) / 24)
-      } else {
-        c(ch = sum(chill_hours_hourly(h, 0, 7.2, output = "hourly")),
-          cu = as.vector(chill_units(h, output = "total")),
-          cp = as.vector(chill_portions(h, output = "total")))
-      }
-      out[[length(out) + 1L]] <- data.frame(season = s, index = names(vals),
-                                            value = unname(vals))
-    }
+source("data-raw/climate-change/helpers.R")
+
+# Fill the raster cache serially: the parallel workers below then only read
+# it, and never write the same cache file at the same time.
+for (s in ssps) for (g in gcms) for (p in unique(c(period, "2021-2040"))) {
+  for (v in c("tmin", "tmax")) {
+    worldclim_future_region(v, region, gcm = g, ssp = s, period = p,
+                            path = wc_dir, mask = FALSE)
   }
-  do.call(rbind, out)
 }
 
-shift_hourly <- function(h, d_min, d_max) {
-  day <- format(h$time, "%Y-%m-%d")
-  t <- h$prom
-  lo <- stats::ave(t, day, FUN = function(v) suppressWarnings(min(v, na.rm = TRUE)))
-  hi <- stats::ave(t, day, FUN = function(v) suppressWarnings(max(v, na.rm = TRUE)))
-  f <- ifelse(is.finite(hi - lo) & hi > lo, (t - lo) / (hi - lo), 0.5)
-  f <- pmin(pmax(f, 0), 1)
-  m <- as.integer(format(h$time, "%m"))
-  t + d_min[m] + f * (d_max[m] - d_min[m])
-}
-
-rows <- list()
-for (i in seq_len(nrow(stations))) {
+run_station <- function(i) {
   code <- stations$station[i]
-  message(sprintf("[%d/%d] %s", i, nrow(stations), stations$name[i]))
+  rows <- list()
   if (anyNA(c(wc_now$tmin[i, ], wc_now$tmax[i, ]))) {
     # Shoreline stations can fall on a sea cell of WorldClim (no data).
-    message("  skipped: no WorldClim data at the station's cell")
-    next
+    message(stations$name[i], ": no WorldClim data at the station's cell")
+    return(NULL)
   }
   h <- readRDS(file.path(cache, paste0(code, ".rds")))
   base <- season_indices(h$time, h$prom)
-  if (is.null(base)) next
+  if (is.null(base)) return(NULL)
   base_mean <- tapply(base$value, base$index, mean)
   n_seasons <- tapply(base$value, base$index, length)
+  record_mid <- mean(as.integer(format(h$time, "%Y")))
   for (s in ssps) for (g in gcms) {
     fut_tmin <- cell(worldclim_future_region("tmin", region, gcm = g,
                                              ssp = s, period = period,
@@ -111,8 +89,16 @@ for (i in seq_len(nrow(stations))) {
     fut_tmax <- cell(worldclim_future_region("tmax", region, gcm = g,
                                              ssp = s, period = period,
                                              path = wc_dir, mask = FALSE))
-    d_min <- fut_tmin[i, ] - wc_now$tmin[i, ]
-    d_max <- fut_tmax[i, ] - wc_now$tmax[i, ]
+    t30 <- cell(worldclim_future_region("tmin", region, gcm = g, ssp = s,
+                                        period = "2021-2040", path = wc_dir,
+                                        mask = FALSE))
+    x30 <- cell(worldclim_future_region("tmax", region, gcm = g, ssp = s,
+                                        period = "2021-2040", path = wc_dir,
+                                        mask = FALSE))
+    d_min <- change_from_record(fut_tmin[i, ] - wc_now$tmin[i, ],
+                                t30[i, ] - wc_now$tmin[i, ], record_mid)
+    d_max <- change_from_record(fut_tmax[i, ] - wc_now$tmax[i, ],
+                                x30[i, ] - wc_now$tmax[i, ], record_mid)
     if (anyNA(c(d_min, d_max))) next
     fut <- season_indices(h$time, shift_hourly(h, d_min, d_max))
     fut_mean <- tapply(fut$value, fut$index, mean)
@@ -123,10 +109,14 @@ for (i in seq_len(nrow(stations))) {
       baseline = as.vector(base_mean[ix]),
       future = as.vector(fut_mean[ix]),
       change = as.vector(fut_mean[ix] - base_mean[ix]),
-      delta_tmin = mean(d_min), delta_tmax = mean(d_max))
+      delta_tmin = mean(d_min), delta_tmax = mean(d_max),
+      record_mid = round(record_mid, 1))
   }
+  message(stations$name[i], ": done")
+  do.call(rbind, rows)
 }
-res <- do.call(rbind, rows)
+res <- do.call(rbind, parallel::mclapply(seq_len(nrow(stations)), run_station,
+                                         mc.cores = cores))
 num <- vapply(res, is.numeric, TRUE)
 res[num] <- lapply(res[num], round, 3)
 utils::write.csv(res, file.path(out_dir, "cc-ceaza-stations.csv"),
